@@ -3,6 +3,8 @@ package com.example.swipeapp.ui
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
@@ -15,6 +17,11 @@ import android.widget.ImageView
 import android.widget.ProgressBar
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.work.Constraints
+import androidx.work.ExistingWorkPolicy
+import androidx.work.NetworkType
+import androidx.work.OneTimeWorkRequestBuilder
+import androidx.work.WorkManager
 import com.google.android.material.bottomsheet.BottomSheetDialogFragment
 import com.google.android.material.button.MaterialButton
 import com.google.android.material.dialog.MaterialAlertDialogBuilder
@@ -23,7 +30,11 @@ import com.google.android.material.textfield.TextInputLayout
 import com.example.swipeapp.R
 import com.example.swipeapp.api.AddProductResponse
 import com.example.swipeapp.api.ProductService
+import com.example.swipeapp.data.AppDatabase
+import com.example.swipeapp.data.PendingProduct
+import com.example.swipeapp.data.SyncStatus
 import com.example.swipeapp.network.NetworkModule
+import com.example.swipeapp.work.ProductSyncWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -32,8 +43,6 @@ import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.MultipartBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
-import retrofit2.Retrofit
-import retrofit2.converter.gson.GsonConverterFactory
 import java.io.File
 import java.io.FileOutputStream
 
@@ -53,6 +62,7 @@ class AddProductFragment : BottomSheetDialogFragment() {
     private var selectedImageUri: Uri? = null
     private val productTypes = listOf("Product", "Service")
     private var productUpdateListener: ProductUpdateListener? = null
+    private lateinit var database: AppDatabase
 
     private val productService = NetworkModule.productService
 
@@ -68,6 +78,7 @@ class AddProductFragment : BottomSheetDialogFragment() {
 
     override fun onAttach(context: Context) {
         super.onAttach(context)
+        database = AppDatabase.getDatabase(context)
         // Try to find the listener from parent fragment first
         productUpdateListener = parentFragment as? ProductUpdateListener
         // If not found in parent fragment, try activity
@@ -178,33 +189,17 @@ class AddProductFragment : BottomSheetDialogFragment() {
                 progressBar.visibility = View.VISIBLE
                 submitButton.isEnabled = false
 
-                val productName = productNameInput.text.toString()
-                    .toRequestBody("text/plain".toMediaTypeOrNull())
-                val productType = productTypeDropdown.text.toString()
-                    .toRequestBody("text/plain".toMediaTypeOrNull())
-                val price = priceInput.text.toString()
-                    .toRequestBody("text/plain".toMediaTypeOrNull())
-                val tax = taxInput.text.toString()
-                    .toRequestBody("text/plain".toMediaTypeOrNull())
-
-                val imagePart = selectedImageUri?.let { uri ->
-                    val file = createTempFileFromUri(uri)
-                    val requestFile = file.asRequestBody("image/*".toMediaTypeOrNull())
-                    MultipartBody.Part.createFormData("files[]", file.name, requestFile)
+                // Save image to internal storage if selected
+                val savedImagePath = selectedImageUri?.let { uri ->
+                    saveImageToInternalStorage(uri)
                 }
 
-                val response = withContext(Dispatchers.IO) {
-                    productService.addProduct(productName, productType, price, tax, imagePart)
-                }
-
-                if (response.isSuccessful && response.body()?.success == true) {
-                    showSuccessDialog(response.body()!!)
+                if (isNetworkAvailable()) {
+                    // Online - Upload directly
+                    uploadProductToServer(savedImagePath)
                 } else {
-                    Toast.makeText(
-                        context,
-                        "Failed to add product: ${response.message()}",
-                        Toast.LENGTH_LONG
-                    ).show()
+                    // Offline - Save locally
+                    saveProductLocally(savedImagePath)
                 }
             } catch (e: Exception) {
                 Toast.makeText(
@@ -219,13 +214,100 @@ class AddProductFragment : BottomSheetDialogFragment() {
         }
     }
 
-    private fun createTempFileFromUri(uri: Uri): File {
+    private suspend fun uploadProductToServer(savedImagePath: String?) {
+        val productName = productNameInput.text.toString()
+            .toRequestBody("text/plain".toMediaTypeOrNull())
+        val productType = productTypeDropdown.text.toString()
+            .toRequestBody("text/plain".toMediaTypeOrNull())
+        val price = priceInput.text.toString()
+            .toRequestBody("text/plain".toMediaTypeOrNull())
+        val tax = taxInput.text.toString()
+            .toRequestBody("text/plain".toMediaTypeOrNull())
+
+        val imagePart = savedImagePath?.let { path ->
+            val file = File(path)
+            val requestFile = file.asRequestBody("image/*".toMediaTypeOrNull())
+            MultipartBody.Part.createFormData("files[]", file.name, requestFile)
+        }
+
+        val response = withContext(Dispatchers.IO) {
+            productService.addProduct(productName, productType, price, tax, imagePart)
+        }
+
+        if (response.isSuccessful && response.body()?.success == true) {
+            showSuccessDialog(response.body()!!)
+        } else {
+            Toast.makeText(
+                context,
+                "Failed to add product: ${response.message()}",
+                Toast.LENGTH_LONG
+            ).show()
+        }
+    }
+
+    private suspend fun saveProductLocally(savedImagePath: String?) {
+        val pendingProduct = PendingProduct(
+            productName = productNameInput.text.toString(),
+            productType = productTypeDropdown.text.toString(),
+            price = priceInput.text.toString().toDouble(),
+            tax = taxInput.text.toString().toDouble(),
+            imagePath = savedImagePath
+        )
+
+        withContext(Dispatchers.IO) {
+            database.pendingProductDao().insert(pendingProduct)
+        }
+
+        showOfflineSuccessDialog()
+        scheduleSync()
+    }
+
+    private fun saveImageToInternalStorage(uri: Uri): String {
         val inputStream = requireContext().contentResolver.openInputStream(uri)
-        val tempFile = File.createTempFile("upload", ".jpg", requireContext().cacheDir)
-        FileOutputStream(tempFile).use { outputStream ->
+        val file = File(requireContext().filesDir, "product_images/${System.currentTimeMillis()}.jpg")
+        file.parentFile?.mkdirs()
+        
+        FileOutputStream(file).use { outputStream ->
             inputStream?.copyTo(outputStream)
         }
-        return tempFile
+        return file.absolutePath
+    }
+
+    private fun isNetworkAvailable(): Boolean {
+        val connectivityManager = requireContext().getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = connectivityManager.activeNetwork
+        val capabilities = connectivityManager.getNetworkCapabilities(network)
+        return capabilities != null &&
+                (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+                 capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR))
+    }
+
+    private fun showOfflineSuccessDialog() {
+        MaterialAlertDialogBuilder(requireContext())
+            .setTitle("Saved Offline")
+            .setMessage("Product saved locally and will be uploaded when internet connection is available.")
+            .setPositiveButton("OK") { _, _ ->
+                productUpdateListener?.onProductAdded()
+                dismiss()
+            }
+            .show()
+    }
+
+    private fun scheduleSync() {
+        val constraints = Constraints.Builder()
+            .setRequiredNetworkType(NetworkType.CONNECTED)
+            .build()
+
+        val syncWork = OneTimeWorkRequestBuilder<ProductSyncWorker>()
+            .setConstraints(constraints)
+            .build()
+
+        WorkManager.getInstance(requireContext())
+            .enqueueUniqueWork(
+                "product_sync",
+                ExistingWorkPolicy.APPEND_OR_REPLACE,
+                syncWork
+            )
     }
 
     private fun showSuccessDialog(response: AddProductResponse) {
