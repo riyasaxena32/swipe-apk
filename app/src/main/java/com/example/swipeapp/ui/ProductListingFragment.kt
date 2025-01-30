@@ -21,6 +21,7 @@ import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.floatingactionbutton.FloatingActionButton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import com.example.swipeapp.network.NetworkModule
 
 class ProductListingFragment : Fragment() {
 
@@ -31,12 +32,7 @@ class ProductListingFragment : Fragment() {
     private lateinit var addProductFab: FloatingActionButton
     private var allProducts = listOf<Product>()
 
-    private val retrofit = Retrofit.Builder()
-        .baseUrl("https://app.getswipe.in/")
-        .addConverterFactory(GsonConverterFactory.create())
-        .build()
-
-    private val productService = retrofit.create(ProductService::class.java)
+    private val productService = NetworkModule.productService
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -87,9 +83,7 @@ class ProductListingFragment : Fragment() {
 
     private fun setupAddProductButton() {
         addProductFab.setOnClickListener {
-            // Navigate to Add Product screen
-            // TODO: Implement navigation to Add Product screen
-            Toast.makeText(context, "Add Product clicked", Toast.LENGTH_SHORT).show()
+            AddProductFragment.newInstance().show(parentFragmentManager, "add_product")
         }
     }
 
