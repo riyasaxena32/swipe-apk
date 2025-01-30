@@ -23,7 +23,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import com.example.swipeapp.network.NetworkModule
 
-class ProductListingFragment : Fragment() {
+class ProductListingFragment : Fragment(), ProductUpdateListener {
 
     private lateinit var productAdapter: ProductAdapter
     private lateinit var recyclerView: RecyclerView
@@ -83,7 +83,7 @@ class ProductListingFragment : Fragment() {
 
     private fun setupAddProductButton() {
         addProductFab.setOnClickListener {
-            AddProductFragment.newInstance().show(parentFragmentManager, "add_product")
+            AddProductFragment.newInstance().show(childFragmentManager, "add_product")
         }
     }
 
@@ -127,5 +127,9 @@ class ProductListingFragment : Fragment() {
                 progressBar.visibility = View.GONE
             }
         }
+    }
+
+    override fun onProductAdded() {
+        loadProducts() // Reload the product list
     }
 } 

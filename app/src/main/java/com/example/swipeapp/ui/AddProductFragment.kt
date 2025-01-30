@@ -1,6 +1,7 @@
 package com.example.swipeapp.ui
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
@@ -51,6 +52,7 @@ class AddProductFragment : BottomSheetDialogFragment() {
 
     private var selectedImageUri: Uri? = null
     private val productTypes = listOf("Product", "Service")
+    private var productUpdateListener: ProductUpdateListener? = null
 
     private val productService = NetworkModule.productService
 
@@ -61,6 +63,16 @@ class AddProductFragment : BottomSheetDialogFragment() {
                 productImage.scaleType = ImageView.ScaleType.CENTER_CROP
                 productImage.setImageURI(uri)
             }
+        }
+    }
+
+    override fun onAttach(context: Context) {
+        super.onAttach(context)
+        // Try to find the listener from parent fragment first
+        productUpdateListener = parentFragment as? ProductUpdateListener
+        // If not found in parent fragment, try activity
+        if (productUpdateListener == null) {
+            productUpdateListener = context as? ProductUpdateListener
         }
     }
 
@@ -221,6 +233,7 @@ class AddProductFragment : BottomSheetDialogFragment() {
             .setTitle("Success")
             .setMessage("Product added successfully!\nProduct ID: ${response.product_id}")
             .setPositiveButton("OK") { _, _ ->
+                productUpdateListener?.onProductAdded()
                 dismiss()
             }
             .show()
